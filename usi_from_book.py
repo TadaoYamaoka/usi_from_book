@@ -1,5 +1,5 @@
 import numpy as np
-from cshogi import *
+from cshogi import Board, move_to_usi, REPETITION_DRAW, REPETITION_WIN, REPETITION_LOSE, BookEntry, BLACK
 from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_BOOK = "book.bin"
@@ -88,17 +88,41 @@ class Player:
         index_r = np.searchsorted(self.book_key, key, "right")
         return self.book[index:index_r]
     
-    def get_pv(self, move16, depth):
-        pv = [move16]
-        if depth > 0:
-            self.board.push_move16(move16)
-            draw = self.board.is_draw()
-            if draw not in (REPETITION_DRAW, REPETITION_WIN, REPETITION_LOSE):
-                entry = self.get_entry(self.board.book_key())
-                if entry is not None:
-                    pv.extend(self.get_pv(entry["fromToPro"], depth - 1))
-            self.board.pop()
-        return pv
+    def get_pv(self, alpha, beta, depth):
+        entries = self.get_entries(self.board.book_key())
+        if entries is None:
+            return 32602, []
+        trusted_score = 100000
+        best_score = -100000
+        for entry in entries:
+            score = entry["score"]
+            if score < trusted_score:
+                trusted_score = score
+            score = trusted_score
+            pv = []
+            move16 = entry["fromToPro"]
+            draw = self.board.move_is_draw(move16)
+            if draw == REPETITION_DRAW:
+                score = -self.draw_eval if self.board.turn == BLACK else self.draw_eval
+            elif draw == REPETITION_WIN:
+                score = -30000
+            elif draw == REPETITION_LOSE:
+                score = 30000
+            else:
+                if depth > 0:
+                    self.board.push_move16(move16)
+                    ret_score, pv = self.get_pv(-beta, -alpha, depth - 1)
+                    if ret_score != 32602:
+                        score = -ret_score
+                    self.board.pop()
+
+            if score > best_score:
+                best_score = score
+                best_pv = [move16] + pv
+            alpha = max(alpha, score)
+            if alpha >= beta:
+                break
+        return alpha, best_pv
 
     def go(self):
         pv_list = []
@@ -106,39 +130,49 @@ class Player:
         if entries is None:
             return "resign", None
         else:
+            trusted_score = 100000
             for entry in entries:
+                score = entry["score"]
+                if score < trusted_score:
+                    trusted_score = score
+                score = trusted_score
+                pv = []
+                move16 = entry["fromToPro"]
+                draw = self.board.move_is_draw(move16)
+                if draw == REPETITION_DRAW:
+                    score = -self.draw_eval if self.board.turn == BLACK else self.draw_eval
+                elif draw == REPETITION_WIN:
+                    score = -30000
+                elif draw == REPETITION_LOSE:
+                    score = 30000
+                else:
+                    if self.pv_depth > 0:
+                        self.board.push_move16(move16)
+                        ret_score, pv = self.get_pv(-100000, 100000, self.pv_depth - 1)
+                        if ret_score != 32602:
+                            score = -ret_score
+                        self.board.pop()
+
                 pv_list.append(
                     [
-                        move_to_usi(entry["fromToPro"]),
-                        entry["score"],
-                        self.get_pv(entry["fromToPro"], self.pv_depth),
+                        [move16] + pv,
+                        score,
                     ]
                 )
-                if len(pv_list) >= self.multipv:
-                    break
 
-        for pv in pv_list:
-            self.board.push_usi(pv[0])
-            draw = self.board.is_draw()
-            if draw == REPETITION_DRAW:
-                pv[1] = self.draw_eval * (-1 if self.board.turn == WHITE else 1)
-            elif draw == REPETITION_WIN:
-                pv[1] = -30000
-            elif draw == REPETITION_LOSE:
-                pv[1] = 30000
-            self.board.pop()
+        pv_list = sorted(pv_list, key=lambda x: x[1], reverse=True)
 
         if self.multipv == 1:
             pv = pv_list[0]
-            print(f"info score cp {pv[1]} pv {' '.join(move_to_usi(move) for move in pv[2])}")
+            print(f"info score cp {pv[1]} pv {' '.join(move_to_usi(move) for move in pv[0])}")
         else:
             for i, pv in enumerate(pv_list):
                 print(
-                    f"info multipv {i + 1} score cp {pv[1]} pv {' '.join(move_to_usi(move) for move in pv[2])}"
+                    f"info multipv {i + 1} score cp {pv[1]} pv {' '.join(move_to_usi(move) for move in pv[0])}"
                 )
                 if i + 1 >= self.multipv:
                     break
-        return pv_list[0][0], None
+        return move_to_usi(pv_list[0][0][0]), None
 
     def stop(self):
         pass
